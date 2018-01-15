@@ -1,0 +1,181 @@
+Installed fzf
+Improved vim
+Tutorial go
+
+
+We will build several microservices with the purpose to explore inter service communication patters and typical issues we found while facing a ms architecture.
+ - Asyncronous comunication between Microservices using pub/sub queues  
+ - Syncronous comunication between Microservices using REST
+ - A main edge service to agregate results from downstream services
+ - Each service will own its own database ( for simplicity we will simple inmemory maps)
+ - Microservices healthchecks 
+ - Service discovery using Consul
+ - Explore posibilities using  ist.io, linkerd and Kubernetes
+
+
+ The domain of our problem will be video metadata retrieval and statistic recording.
+ So we can assume that we try to watch a video, we need to figure out a few metadata that lives in different repositories
+ - Medatata related to the video itself like title, summary, genre
+ - URL where the video is published so the web page can play it
+
+ At the same time we want to track events to indicate the number of times John Doe viewed any movie and the number of times a movie was viewed by any user.
+ I'm aware is not a real use business case, but I wanted to hack something quick without thinking on the usefulness from business perspective.
+
+ I will use Go as implementation language as an excuse to learn a new language and see why all the hype about it. 
+ So bear with me as I'm totally new, so probably some of the decision I take are wrong due to lack of experience in the language.
+
+ Due to the extension of the subject I will split these blogs in several parts.
+ We will start our solution with the simplest approach 
+
+ Main diagram
+
+ We have 3 main downstream micro services which are listed below
+
+cdnurl - 
+    GET url/asset/:assetId
+    POST url/asset/:assetId
+metadata
+    GET content/asset/:assetId
+    POST content/asset/:assetId
+reporting
+    POST events/asset/:assetId/user/:userId
+	GET events/user/:userId", viewsPerUser
+	GET events/asset/:assetId", viewsPerAsset
+
+These services can be considered as backend services which will not be exposed directly to our enduser. 
+They perform basid CRUD operations on isolated databases (in memory maps). I provided POST endpoints just to allow adding data externally by an admin interface that could be 
+easily scripted via bash script if required. By default cdnurl and metadata url are loaded with the information of 2 assets with identifiers 123 and 456.
+
+We mentioned these services are not intended to be used by our frontend SPA application. So how can we get data from there?
+Depending on the scenario sometimes would be enough building a proxy API gateway like we can see in AWS to invoke lambdas. 
+Or we could use Kong as API gateway.
+Or we could use simply NGINX as reverse proxy to route our requests to the services.
+That would work perfectly if there is no need to do something extra aside of the aggregation/orchestration. 
+However the SPA frontend would know too much about the underlying microservice structure, i.e more coupled. 
+Therefore I created an edge play service which agregates content from downstream services ( cdnurl and metadata) and record stats.
+
+play
+    POST events/asset/:assetId/user/:userId
+
+The microservice uses a request-response pattern to communicate with those two services.
+As part of our POC I wanted to send asyncronous services, so I decided that our edge service will not speak directly with our reporting service.
+Instead our playservice will just emit events to be published in a "events" queue.
+
+Those events will be of no use if they are not consumed. The last component of our architecture
+
+queue_listener
+    Consumes messages from the "events" queue and sends a POST request to the reporting service so the stats can be tracked.
+
+curl -X POST localhost:8082/events/asset/123/user/1
+curl localhost:8082/events/asset/123
+curl localhost:8082/events/user/1                                                                                                         mfarache@OEL0043
+
+## Installing GIN 
+
+We will use Gin https://github.com/gin-gonic/gin
+
+echo $GOPATH                           
+/Users/mfarache/Documents/workspace/go-samples/videoms
+CD $GOPATH
+go get github.com/gin-gonic/gin
+
+https://mholt.github.io/json-to-go/
+
+## Installing NATS
+
+Install NATS server:
+echo $GOPATH                           
+/Users/mfarache/Documents/workspace/go-samples/videoms
+CD $GOPATH
+#install our NATS server libraries
+go get github.com/nats-io/gnatsd
+#install our NATS client libraries
+go get github.com/nats-io/go-nats
+
+Once we want to start our NATS server we need to do 
+$GOPATH/bin/gnatsd
+
+# Build everything
+
+The folder structure is as follows
+
+
+.
+├── cdnurl.go
+├── client
+│   ├── cdnurlclient.go
+│   ├── contentclient.go
+│   ├── reportingclient.go
+│   └── types
+│       ├── contenttype.go
+│       ├── playresponsetype.go
+│       ├── stattype.go
+│       └── urltype.go
+├── metadata.go
+├── playservice.go
+├── queue
+│   ├── connect.go
+│   ├── publisher.go
+│   └── receiver.go
+├── queue_listener.go
+├── reporting.go
+
+As I have not used any Go dependencies system, this script will build everything in one go 
+
+cd $GOPATH/client ; go build ; go install client 
+cd $GOPATH/client/types ; go build ; go install client/types
+cd $GOPATH/queue ; go build ; ; go install queue
+cd $GOPATH; go build metadata.go ; go build playservice.go ; go build reporting.go; go build cdnurl.go ; go build queue_listener.go
+
+
+
+Lessons learnt
+
++ Functions in go can return multiple values. Used mostly to return both a result and an errors
+    client := &http.Client{}
+	response, err := client.Do(req)
+	if err != nil {
+		log.Fatal("Do: ", err)
+		return record
+	}
+
++ Parsing parameters using "flag"
++ Http client request/response and JSON deserialization is as easy as can be with standard libraries.
+The standard Go libraries (http and encoding/json) do the job pretty well so we can submit GET, POST 
+and any HTTP verbs, and parse the response seamesly into a Go struct with a few lines of code.
+
++ There are plenty of microservices frameworks for go. I chose gin because seems simple enough for a newbie.
+
++ Use the init() method - Use it as a way to guarantee that specific bits of your code are invoked immediately before main method is executed
+
++ Go is not a OO lenguage per se as we are used in the JAVA world, for example classes and inheritance is not implemented as we would expect. 
+You can have a look to the client/types package where we define the structs that map our json responses.
+Learning curve is medium.. It took me more to break down the code into small subclasses or responsabilities (API clients, shared types and base services) that hacking the main services in half a day.
+most of the time was spent on refactoring and creating modular pieces and dealing with issues about how to create shared libraries, 
+folder structure, conflicts with GOPATH variable, etc.
++ Remember to configure properly GOPATH variable and if possible add it to your profile script (zsh, bash or your favourite)
+
++ IDES
++ I used VS Code as an IDE with the Go plugin and did the job for a newbie. 
++ You need to configure a setting in VS code in order to inform the IDE where you Go code lives
+"go.gopath": "/Users/mfarache/Documents/workspace/go-samples/videoms"
+
+The good Takeaways
++ Love the fact that the size of the executable is really small (around 13Mb)
++ building and installing shared libraries is not that hard once you get the hang of it.
+
+
+Things that annoyed me (slightly)
+- If you have several go files with main in the same package you need to be careful with the declaration of variables or function names as there will be collisions raised by VS code.
+  It would not be an issue if we create specific packages for each 
+  However when you build your code manually individually i.e < go build myservice.go > those errors are gone. Any
+- Need to explore a build system instead of doing go build and go install over and over.  (https://github.com/golang/dep)
+
+
+Adding a queue
+
+
+
+
+
+
